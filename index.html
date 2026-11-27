@@ -215,11 +215,24 @@ function planFor(id){return JSON.parse(JSON.stringify(id==="wife"?WIFE_PLAN:DEFA
 function defaultPerson(id){
   const t=todayStr();
   const profile=id==="wife"
-    ? {name:"Wife",age:30,height:163,sex:"f",goal:0,start:t,days:3,diet:"any",cricket:false}
-    : {name:"Me",age:30,height:175,sex:"m",goal:84,start:t,days:4,diet:"any",cricket:true};
-  return {profile,plan:planFor(id),overrides:{},logs:[],weights:id==="wife"?[]:[{date:t,kg:89}],daily:{},session:null,tab:"today"};
+    ? {name:"Wife",age:0,height:0,sex:"f",goal:0,start:t,days:3,diet:"any",cricket:false}
+    : {name:"Me",age:0,height:0,sex:"m",goal:0,start:t,days:4,diet:"any",cricket:true};
+  return {profile,plan:planFor(id),overrides:{},logs:[],weights:[],daily:{},session:null,tab:"today"};
 }
-function defaultRoot(){return {active:"me",people:{me:defaultPerson("me"),wife:defaultPerson("wife")}}}
+function defaultRoot(){return {v:2,active:"me",people:{me:defaultPerson("me"),wife:defaultPerson("wife")}}}
+/* One-time update: the first release pre-filled placeholder stats. Clear any that were
+   never edited so each person enters their own in Profile. Workouts are kept. */
+function migrate(){
+  if(R.v>=2) return;
+  for(const per of Object.values(R.people||{})){
+    const p=per.profile; if(!p) continue;
+    if(p.age===30) p.age=0;
+    if((p.sex==="m"&&p.height===175)||(p.sex==="f"&&p.height===163)) p.height=0;
+    if(p.goal===84) p.goal=0;
+    if(per.weights.length===1&&per.weights[0].kg===89&&!per.logs.length) per.weights=[];
+  }
+  R.v=2;
+}
 async function readKey(k){
   if(window.storage){ try{const r=await window.storage.get(k,false); return r&&r.value?JSON.parse(r.value):null;}catch(e){return null;} }
   try{const v=localStorage.getItem(k); return v?JSON.parse(v):null;}catch(e){return null;}
@@ -230,6 +243,7 @@ async function load(){
     R=defaultRoot();
     for(const k of OLDKEYS){const old=await readKey(k); if(old&&old.profile){old.profile.name=old.profile.name||"Me"; if(old.profile.cricket===undefined) old.profile.cricket=true; R.people.me=old; break;}}
   }
+  migrate();
   if(!R.people[R.active]) R.active=Object.keys(R.people)[0];
   S=R.people[R.active];
   render(); save();
@@ -308,7 +322,7 @@ function estMin(w){
   return Math.round(s/60);
 }
 function lastSets(id){
-  for(let i=S.logs.length-1;i>=0;i--){const x=S.logs[i].sets[id]; if(x&&x.length) return {sets:x,wid:S.logs[i].wid};}
+  for(let i=S.logs.length-1;i>=0;i--){const x=S.logs[i].sets[id]; if(x&&x.length) return {sets:x,wid:S.logs[i].wid,date:S.logs[i].date};}
   return null;
 }
 function suggest(wid,id){
@@ -325,11 +339,14 @@ function suggest(wid,id){
 }
 function today(){const k=todayStr(); if(!S.daily[k]) S.daily[k]={meals:[false,false,false,false],water:0,creatine:false,produce:0,sleep:false}; return S.daily[k];}
 function nutrition(){
-  const p=S.profile,w=curWeight(); if(!w) return null;
+  const p=S.profile,w=curWeight(); if(!w||!p.age||!p.height) return null;
   const bmr=10*w+6.25*p.height-5*p.age+(p.sex==="m"?5:-161);
   const tdee=bmr*(p.days>=4?1.55:1.45);
-  const adj=p.goal&&p.goal<w-0.5?-400:(p.goal&&p.goal>w+0.5?250:0);
-  const kcal=Math.round((tdee+adj)/50)*50;
+  // Fat loss: ~500 kcal/day deficit for men, ~300 for women (gentler on a smaller frame),
+  // never below 1.2 x BMR or a safe floor so training and recovery don't suffer.
+  const adj=p.goal&&p.goal<w-0.5?(p.sex==="m"?-500:-300):(p.goal&&p.goal>w+0.5?250:0);
+  const floor=Math.max(bmr*1.2,p.sex==="m"?1800:1400);
+  const kcal=Math.round(Math.max(tdee+adj,adj<0?floor:0)/50)*50;
   const protein=Math.round(w*(p.sex==="m"?1.8:1.6)/5)*5;
   const fat=Math.round(w*0.8/5)*5;
   const carbs=Math.max(0,Math.round((kcal-protein*4-fat*9)/4/5)*5);
@@ -370,6 +387,15 @@ function endTimer(){ if(!TM) return; clearInterval(TM.iv); const cb=TM.onDone; T
 function toast(m){const t=$("#toast");t.textContent=m;t.hidden=false;clearTimeout(t._t);t._t=setTimeout(()=>t.hidden=true,2600)}
 
 /* ---------- Screens ---------- */
+function setupCard(){
+  const p=S.profile, need=[];
+  if(!p.age||!p.height) need.push(["profile","Add your age and height in Profile"]);
+  if(!p.goal) need.push(["profile","Set a goal weight in Profile"]);
+  if(!S.weights.length) need.push(["progress","Log your weight in Progress"]);
+  if(!need.length) return "";
+  return `<section class="card"><h3>Finish setting up</h3><p class="muted small">Takes a minute. Your details stay on this phone.</p>
+    ${need.map(([t,l])=>`<button class="chk" data-tab="${t}"><span class="box"></span><span class="grow">${l}</span></button>`).join("")}</section>`;
+}
 function todayHTML(){
   const wk=weekNo(),P=PH[phaseIdx()],nid=nextWid(),w=getW(nid),d=today(),n=nutrition();
   const doneToday=S.logs.some(l=>l.date===todayStr());
@@ -380,6 +406,7 @@ function todayHTML(){
     <h1>${doneToday?"Workout done today. Nice.":"Next up: "+esc(w.name)}</h1>
     <p class="muted small" style="margin-top:8px">${P.tip}</p>
   </header>
+  ${setupCard()}
   <section class="card">
     <div class="row between"><h2>${esc(w.name)}</h2><span class="pill num">about ${estMin(w)} min</span></div>
     <ul class="plain" style="margin:8px 0 14px">${w.items.map(id=>`<li><span>${EX[id].name}</span><span class="muted small num">${tgtTxt(w.id,id)}</span></li>`).join("")}</ul>
@@ -417,6 +444,7 @@ function sessionHTML(){
       <div style="text-align:center"><b class="num" style="font-size:26px">${s.weight||0} lb</b><div class="muted small">${ex.eq==="bb"?"total, bar included":"each dumbbell"}</div></div>
       <button class="btn ghost sm" data-act="wplus" aria-label="More weight">+5</button></div>
       <p class="muted small" style="text-align:center;margin-top:8px">${esc(s.note||"")}</p></div>`:""}
+    ${(()=>{const L=lastSets(id);return L?`<p class="muted small num" style="text-align:center;margin:0 0 12px">Last time: ${setsSummary(ex,L.sets)}${L.date?", "+fmtDate(L.date):""}</p>`:""})()}
     <button class="btn" data-act="doneset">Done set (${s.count} reps)</button>`;
   } else if(ex.type==="time"){
     body=`
@@ -476,7 +504,7 @@ function planHTML(){
 
 function foodHTML(){
   const n=nutrition(),d=today(),meals=["Breakfast","Lunch","Snack","Dinner"];
-  if(!n) return `<header class="band">${whoBar()}<h1>Food</h1><p class="muted small" style="margin-top:6px">Log your weight on the Progress tab and your daily targets will appear here.</p></header><button class="btn" data-tab="progress">Log my weight</button>`;
+  if(!n) return `<header class="band">${whoBar()}<h1>Food</h1><p class="muted small" style="margin-top:6px">Your daily calorie and protein targets appear here once your profile is set up.</p></header>${setupCard()}`;
   return `
   <header class="band">${whoBar()}<h1>${n.kcal} kcal a day</h1><p class="muted small" style="margin-top:6px">${n.adj<0?"A gentle deficit to lose fat while you build muscle.":n.adj>0?"A small surplus to build muscle.":"Maintenance calories: lose fat and build muscle at the same time."} Hit protein first.</p></header>
   <section class="card"><div class="grid4">
@@ -554,10 +582,59 @@ function progressHTML(){
     ${chartSVG()}
     <div class="row" style="margin-top:10px"><input type="number" step="0.1" inputmode="decimal" id="wIn" placeholder="Today's weight in kg" aria-label="Today's weight in kg"><button class="btn sm" data-act="logweight">Log</button></div>
   </section>
-  <section class="card"><h3>Recent workouts</h3>
-    ${S.logs.length?`<ul class="plain small" style="margin-top:6px">${S.logs.slice(-10).reverse().map(l=>`<li><span>${esc(getW(l.wid)?.name||l.wid)}</span><span class="muted num">${l.date}</span></li>`).join("")}</ul>`:`<p class="muted small">Finished workouts show up here. Start one from Today.</p>`}
+  <section class="card"><h3>Workout history</h3>
+    ${S.logs.length?`<p class="muted small">Tap a workout to see every set.</p>
+      <div style="margin-top:4px">${S.logs.map((l,i)=>i).reverse().slice(0,SHOWALL?undefined:10).map(i=>{const l=S.logs[i],st=logStats(l);
+        return `<button class="chk" data-act="viewlog" data-i="${i}"><span class="grow"><b>${esc(logName(l))}</b><br><span class="muted small num">${fmtDate(l.date)}${l.mins?", "+l.mins+" min":""}</span></span><span class="muted small num" style="text-align:right">${st.ex} exercises<br>${st.sets} sets</span></button>`}).join("")}</div>
+      ${S.logs.length>10?`<button class="btn ghost sm" style="margin-top:10px" data-act="showall">${SHOWALL?"Show fewer":"Show all "+S.logs.length+" workouts"}</button>`:""}`
+    :`<p class="muted small">Finished workouts show up here. Start one from Today.</p>`}
   </section>
   ${bestLifts()}`;
+}
+
+/* ---------- Workout history ---------- */
+let VIEW=null, SHOWALL=false;
+function fmtDate(ds,long){
+  const d=new Date(ds+"T00:00:00");
+  return d.toLocaleDateString(undefined,long?{weekday:"long",month:"long",day:"numeric",year:"numeric"}:{weekday:"short",month:"short",day:"numeric"});
+}
+function logName(l){return l.name||getW(l.wid)?.name||"Workout"}
+function logStats(l){const ids=Object.keys(l.sets||{});return {ex:ids.length,sets:ids.reduce((a,id)=>a+l.sets[id].length,0)}}
+function setTxt(ex,st){
+  if(!ex) return st.reps?st.reps+" reps":"Done";
+  if(st.manual) return "Done";
+  if(st.rounds) return st.rounds+" rounds";
+  if(st.secs) return fmtDur(st.secs)+perTxt(ex);
+  return st.reps+" reps"+perTxt(ex)+(st.w?" at "+st.w+" lb":"");
+}
+function setsSummary(ex,sets){
+  if(!sets||!sets.length) return "";
+  if(ex.type!=="reps") return sets.map(s=>setTxt(ex,s)).join(", ");
+  const ws=[...new Set(sets.map(s=>s.w||0))];
+  if(ws.length===1) return sets.map(s=>s.reps).join(", ")+" reps"+(ws[0]?" at "+ws[0]+" lb":"");
+  return sets.map(s=>s.reps+(s.w?" × "+s.w+" lb":"")).join(", ");
+}
+function logDetailHTML(i){
+  const l=S.logs[i]; if(!l){VIEW=null;return progressHTML();}
+  const w=getW(l.wid), order=[...(w?w.items:[]),...Object.keys(l.sets)].filter((x,k,a)=>a.indexOf(x)===k&&l.sets[x]);
+  const st=logStats(l);
+  let vol=0; order.forEach(id=>l.sets[id].forEach(s=>{if(s.w&&s.reps) vol+=s.w*s.reps*(EX[id]&&EX[id].eq==="db"?2:1);}));
+  return `
+  <header class="band">
+    <button class="btn ghost sm" data-act="closelog" style="color:inherit;border-color:currentColor;margin-bottom:14px">Back to progress</button>
+    <p class="muted small">${fmtDate(l.date,true)}</p>
+    <h1>${esc(logName(l))}</h1>
+  </header>
+  <section class="card"><div class="grid4" style="grid-template-columns:repeat(${vol?4:3},1fr)">
+    <div class="stat"><b class="num">${st.ex}</b><span>exercises</span></div>
+    <div class="stat"><b class="num">${st.sets}</b><span>sets</span></div>
+    <div class="stat"><b class="num">${l.mins||"–"}</b><span>minutes</span></div>
+    ${vol?`<div class="stat"><b class="num">${vol>=10000?(vol/1000).toFixed(1)+"k":vol}</b><span>lb lifted</span></div>`:""}
+  </div></section>
+  ${order.map(id=>{const ex=EX[id],sets=l.sets[id];
+    return `<section class="card"><h3>${ex?ex.name:esc(id)}</h3>
+      <ul class="plain small" style="margin-top:6px">${sets.map((s,k)=>`<li><span>Set ${k+1}</span><span class="num">${setTxt(ex,s)}</span></li>`).join("")}</ul></section>`}).join("")}
+  <button class="btn ghost" data-act="dellog" data-i="${i}" style="color:var(--ball);margin-top:4px">Delete this workout</button>`;
 }
 function bestLifts(){
   const ids=["deadlift","bench","bb_row","rdl","hip_thrust","pullup"];
@@ -572,8 +649,8 @@ function profileHTML(){
   <section class="card">
     <div class="field"><label for="pN">Name</label><input id="pN" type="text" value="${esc(p.name)}" data-p="name"></div>
     <div class="grid2">
-      <div class="field"><label for="pAge">Age</label><input id="pAge" type="number" inputmode="numeric" value="${p.age}" data-p="age"></div>
-      <div class="field"><label for="pH">Height (cm)</label><input id="pH" type="number" inputmode="numeric" value="${p.height}" data-p="height"></div>
+      <div class="field"><label for="pAge">Age</label><input id="pAge" type="number" inputmode="numeric" value="${p.age||""}" placeholder="Years" data-p="age"></div>
+      <div class="field"><label for="pH">Height (cm)</label><input id="pH" type="number" inputmode="numeric" value="${p.height||""}" placeholder="cm" data-p="height"></div>
       <div class="field"><label for="pSex">Sex</label><select id="pSex" data-p="sex"><option value="m" ${p.sex==="m"?"selected":""}>Male</option><option value="f" ${p.sex==="f"?"selected":""}>Female</option></select></div>
       <div class="field"><label for="pG">Goal weight (kg)</label><input id="pG" type="number" inputmode="decimal" step="0.5" value="${p.goal||""}" placeholder="Optional" data-p="goal"></div>
       <div class="field"><label for="pD">Days per week</label><select id="pD" data-p="days"><option value="3" ${p.days==3?"selected":""}>3 days</option><option value="4" ${p.days==4?"selected":""}>4 days</option></select></div>
@@ -600,10 +677,11 @@ function profileHTML(){
 function render(){
   const v=$("#view"),t=S.tab;
   if(t==="today"&&S.session) v.innerHTML=sessionHTML();
+  else if(t==="progress"&&VIEW!==null) v.innerHTML=logDetailHTML(VIEW);
   else v.innerHTML=({today:todayHTML,plan:planHTML,food:foodHTML,progress:progressHTML,profile:profileHTML})[t]();
   document.querySelectorAll(".tabs button").forEach(b=>b.setAttribute("aria-current",b.dataset.tab===t?"page":"false"));
 }
-function go(tab){S.tab=tab;save();render();window.scrollTo(0,0)}
+function go(tab){S.tab=tab;VIEW=null;save();render();window.scrollTo(0,0)}
 
 /* ---------- Session logic ---------- */
 function startSession(wid){
@@ -635,7 +713,7 @@ function nextEx(restFirst){
 function finishSession(){
   const s=S.session;
   const any=Object.keys(s.done).length>0;
-  if(any) S.logs.push({date:todayStr(),wid:s.wid,sets:s.done,mins:Math.round((Date.now()-s.started)/60000)});
+  if(any) S.logs.push({date:todayStr(),wid:s.wid,name:getW(s.wid).name,sets:s.done,mins:Math.round((Date.now()-s.started)/60000)});
   S.session=null; keepAwake(false); save(); render(); window.scrollTo(0,0);
   toast(any?"Workout saved. Get your protein in.":"Workout ended. Nothing logged.");
 }
@@ -667,7 +745,11 @@ document.addEventListener("click",e=>{
     case "jump": s.idx=+b.dataset.i; prepEx(); save(); render(); window.scrollTo(0,0); break;
     case "finish": finishSession(); break;
     case "quit": if(confirm("End this workout? Sets you've done so far will be saved.")) finishSession(); break;
-    case "who": switchTo(b.dataset.id); break;
+    case "who": VIEW=null; switchTo(b.dataset.id); break;
+    case "viewlog": VIEW=+b.dataset.i; render(); window.scrollTo(0,0); break;
+    case "closelog": VIEW=null; render(); window.scrollTo(0,0); break;
+    case "showall": SHOWALL=!SHOWALL; render(); break;
+    case "dellog": if(confirm("Delete this workout from your history?")){S.logs.splice(+b.dataset.i,1);VIEW=null;save();render();window.scrollTo(0,0);toast("Workout deleted");} break;
     case "export": exportData(); break;
     case "tpause": if(TM){TM.paused=!TM.paused;drawTimer();} break;
     case "tskip": endTimer(); break;
